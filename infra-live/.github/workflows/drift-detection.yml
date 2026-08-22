@@ -1,0 +1,113 @@
+name: Terraform Drift Detection
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: eu-west-2
+  TERRAFORM_VERSION: 1.14.8
+
+  TF_VAR_engine_version: ${{ vars.DEV_DB_ENGINE_VERSION }}
+  TF_VAR_instance_class: ${{ vars.DEV_DB_INSTANCE_CLASS }}
+  TF_VAR_allocated_storage: ${{ vars.DEV_DB_ALLOCATED_STORAGE }}
+  TF_VAR_database_name: ${{ vars.DEV_DB_DATABASE_NAME }}
+  TF_VAR_master_username: ${{ vars.DEV_DB_MASTER_USERNAME }}
+  TF_VAR_backup_retention_period: ${{ vars.DEV_DB_BACKUP_RETENTION_PERIOD }}
+  TF_VAR_key_name: ${{ vars.DEV_COMPUTE_KEY_NAME }}
+  TF_VAR_my_ip: ${{ vars.DEV_COMPUTE_MY_IP }}
+
+jobs:
+  drift-detection:
+    name: Drift - ${{ matrix.name }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dev-vpc
+            working_dir: dev/vpc
+            role: arn:aws:iam::442847318797:role/tf-deploy-dev
+          - name: dev-database
+            working_dir: dev/database
+            role: arn:aws:iam::442847318797:role/tf-deploy-dev
+          - name: dev-compute
+            working_dir: dev/compute
+            role: arn:aws:iam::442847318797:role/tf-deploy-dev
+          - name: staging-vpc
+            working_dir: staging/vpc
+            role: arn:aws:iam::442847318797:role/tf-deploy-staging
+          - name: prod-vpc
+            working_dir: prod/vpc
+            role: arn:aws:iam::442847318797:role/tf-deploy-prod
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.working_dir }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ matrix.role }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan (Detect Drift)
+        id: plan
+        run: |
+          set +e
+
+          terraform plan \
+            -input=false \
+            -detailed-exitcode \
+            -out=tfplan
+
+          EXIT_CODE=$?
+
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+          if [ "$EXIT_CODE" -eq 1 ]; then
+            echo "Terraform plan failed."
+            exit 1
+          fi
+
+          if [ "$EXIT_CODE" -eq 2 ]; then
+            echo "Terraform drift detected!"
+            exit 2
+          fi
+
+          echo "No Terraform drift detected."
+
+      - name: Upload Terraform Drift Plan
+        if: failure() && steps.plan.outputs.exit_code == '2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-drift-${{ matrix.name }}-${{ github.run_id }}
+          path: ${{ matrix.working_dir }}/tfplan
+          retention-days: 7

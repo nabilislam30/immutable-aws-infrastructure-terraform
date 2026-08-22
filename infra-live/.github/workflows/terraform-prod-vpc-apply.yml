@@ -1,0 +1,139 @@
+name: Terraform Prod VPC Apply
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "prod/vpc/**"
+      - ".github/workflows/terraform-prod-vpc-pr.yml"
+      - ".github/workflows/terraform-prod-vpc-apply.yml"
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  id-token: write
+
+env:
+  AWS_REGION: eu-west-2
+  TERRAFORM_VERSION: 1.14.8
+  TF_WORKING_DIR: prod/vpc
+
+concurrency:
+  group: terraform-prod-vpc
+  cancel-in-progress: false
+
+jobs:
+  production-approval:
+    name: Production Approval
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Approval granted
+        run: echo "Production deployment approved."
+
+  terraform-apply:
+    name: Prod VPC - Apply Reviewed Plan
+    needs: production-approval
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Find merged pull request
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const response = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha
+            });
+
+            const mergedPr = response.data.find(pr => pr.merged_at && pr.base.ref === "main");
+
+            if (!mergedPr) {
+              core.setFailed(`No merged pull request associated with ${context.sha}`);
+              return;
+            }
+
+            core.info(`Using merged PR #${mergedPr.number} with reviewed head ${mergedPr.head.sha}`);
+            core.setOutput("number", mergedPr.number.toString());
+            core.setOutput("head-sha", mergedPr.head.sha);
+
+      - name: Checkout reviewed commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head-sha }}
+
+      - name: Find reviewed plan workflow run
+        id: plan-run
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const headSha = "${{ steps.pr.outputs.head-sha }}";
+            const response = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "terraform-prod-vpc-pr.yml",
+              event: "pull_request",
+              head_sha: headSha,
+              status: "success",
+              per_page: 10
+            });
+
+            const run = response.data.workflow_runs.find(
+              workflowRun => workflowRun.head_sha === headSha
+            );
+
+            if (!run) {
+              core.setFailed(`No successful Terraform Prod VPC PR Plan run found for ${headSha}`);
+              return;
+            }
+
+            core.info(`Using reviewed workflow run: ${run.id}`);
+            core.setOutput("run-id", run.id.toString());
+
+      - name: Download reviewed Terraform plan
+        uses: actions/download-artifact@v4
+        with:
+          name: prod-vpc-plan-${{ steps.pr.outputs.head-sha }}
+          path: prod/vpc
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.plan-run.outputs.run-id }}
+
+      - name: Verify reviewed plan exists
+        run: |
+          test -f tfplan
+          test -f plan.txt
+          echo "Reviewed Terraform plan artifact found."
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::442847318797:role/tf-deploy-prod
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Apply Reviewed Plan
+        run: |
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            tfplan

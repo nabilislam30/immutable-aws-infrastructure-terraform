@@ -1,0 +1,11 @@
+aws_region = "eu-west-2"
+
+environment = "global"
+
+tags = {
+  Environment = "global"
+  ManagedBy   = "Terraform"
+  Project     = "DevOps-Starter"
+}
+
+alarm_email_endpoint = "nabil.islam@fimatix.com"
