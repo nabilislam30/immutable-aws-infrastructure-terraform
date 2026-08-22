@@ -1,0 +1,97 @@
+name: Golden AMI Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: eu-west-2
+  TF_WORKING_DIR: dev/compute
+
+jobs:
+  build-golden-ami:
+    name: Build Golden AMI
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::442847318797:role/tf-deploy-dev
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.8
+          terraform_wrapper: false
+
+      - name: Initialise Terraform
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -input=false
+
+      - name: Read Image Builder pipeline ARN
+        id: pipeline
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          PIPELINE_ARN="$(terraform output -raw image_pipeline_arn)"
+          echo "pipeline_arn=$PIPELINE_ARN" >> "$GITHUB_OUTPUT"
+          echo "Pipeline ARN: $PIPELINE_ARN"
+
+      - name: Trigger Golden AMI build
+        id: build
+        run: |
+          IMAGE_ARN="$(aws imagebuilder start-image-pipeline-execution \
+            --image-pipeline-arn "${{ steps.pipeline.outputs.pipeline_arn }}" \
+            --region "${AWS_REGION}" \
+            --query 'imageBuildVersionArn' \
+            --output text)"
+
+          echo "image_arn=$IMAGE_ARN" >> "$GITHUB_OUTPUT"
+          echo "Image build ARN: $IMAGE_ARN"
+
+      - name: Wait for Golden AMI build
+        run: |
+          IMAGE_ARN="${{ steps.build.outputs.image_arn }}"
+
+          for attempt in {1..60}; do
+            STATUS="$(aws imagebuilder get-image \
+              --image-build-version-arn "$IMAGE_ARN" \
+              --region "${AWS_REGION}" \
+              --query 'image.state.status' \
+              --output text)"
+
+            echo "Attempt ${attempt}: ${STATUS}"
+
+            case "$STATUS" in
+              AVAILABLE)
+                echo "Golden AMI build completed successfully."
+                exit 0
+                ;;
+
+              FAILED|CANCELLED|DELETED|DISABLED)
+                REASON="$(aws imagebuilder get-image \
+                  --image-build-version-arn "$IMAGE_ARN" \
+                  --region "${AWS_REGION}" \
+                  --query 'image.state.reason' \
+                  --output text)"
+
+                echo "Golden AMI build failed: ${REASON}"
+                exit 1
+                ;;
+            esac
+
+            sleep 60
+          done
+
+          echo "Timed out waiting for the Golden AMI build."
+          exit 1

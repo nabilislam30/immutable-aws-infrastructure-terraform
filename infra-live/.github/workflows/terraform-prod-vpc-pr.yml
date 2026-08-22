@@ -1,0 +1,128 @@
+name: Terraform Prod VPC PR Plan
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "prod/vpc/**"
+      - ".github/workflows/terraform-prod-vpc-pr.yml"
+      - ".github/workflows/terraform-prod-vpc-apply.yml"
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  AWS_REGION: eu-west-2
+  TERRAFORM_VERSION: 1.14.8
+  TF_WORKING_DIR: prod/vpc
+
+jobs:
+  terraform-plan:
+    name: Prod VPC - Validate and Plan
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Checkout reviewed commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::442847318797:role/tf-plan-prod
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Setup Trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514
+        with:
+          version: v0.70.0
+          cache: true
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Trivy Security Scan
+        run: |
+          trivy config \
+            --tf-exclude-downloaded-modules \
+            --exit-code 1 \
+            --quiet \
+            .
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: TFLint Init
+        run: tflint --init
+
+      - name: TFLint
+        run: tflint
+
+      - name: Terraform Plan
+        run: |
+          set -o pipefail
+          terraform plan \
+            -input=false \
+            -no-color \
+            -out=tfplan \
+            | tee plan.txt
+
+      - name: Publish Terraform Plan to Pull Request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const plan = fs.readFileSync("${{ env.TF_WORKING_DIR }}/plan.txt", "utf8");
+            const maxLength = 60000;
+            const displayedPlan = plan.length > maxLength
+              ? `${plan.substring(0, maxLength)}\n\n... plan truncated; full plan is available in the workflow artifact.`
+              : plan;
+
+            const body = [
+              "## Terraform Prod VPC Plan",
+              "",
+              "```terraform",
+              displayedPlan,
+              "```",
+              "",
+              `Plan generated from commit: \`${context.payload.pull_request.head.sha}\``
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+      - name: Upload Reviewed Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-vpc-plan-${{ github.event.pull_request.head.sha }}
+          path: |
+            prod/vpc/tfplan
+            prod/vpc/plan.txt
+          retention-days: 7

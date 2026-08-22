@@ -1,0 +1,173 @@
+name: Terraform Dev Compute PR Plan
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "dev/compute/**"
+      - ".github/workflows/terraform-dev-compute-pr.yml"
+      - ".github/workflows/terraform-dev-compute-apply.yml"
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  AWS_REGION: eu-west-2
+  TERRAFORM_VERSION: 1.14.8
+  TF_WORKING_DIR: dev/compute
+
+  TF_VAR_key_name: ${{ vars.DEV_COMPUTE_KEY_NAME }}
+  TF_VAR_my_ip: ${{ vars.DEV_COMPUTE_MY_IP }}
+
+jobs:
+  terraform-plan:
+    name: Dev Compute - Validate and Plan
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Checkout
+      # -----------------------------------------------------------------------
+
+      - name: Checkout reviewed commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # -----------------------------------------------------------------------
+      # AWS Authentication - GitHub OIDC
+      # -----------------------------------------------------------------------
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::442847318797:role/tf-deploy-dev
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      # -----------------------------------------------------------------------
+      # Tooling
+      # -----------------------------------------------------------------------
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Setup Trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514
+        with:
+          version: v0.70.0
+          cache: true
+
+      # -----------------------------------------------------------------------
+      # Quality Gates
+      # -----------------------------------------------------------------------
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Trivy Security Scan
+        run: |
+          trivy config \
+            --tf-exclude-downloaded-modules \
+            --exit-code 1 \
+            --quiet \
+            .
+
+      # -----------------------------------------------------------------------
+      # Terraform Initialisation and Validation
+      # -----------------------------------------------------------------------
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: TFLint Init
+        run: tflint --init
+
+      - name: TFLint
+        run: tflint
+
+      # -----------------------------------------------------------------------
+      # Terraform Plan
+      # -----------------------------------------------------------------------
+
+      - name: Terraform Plan
+        run: |
+          set -o pipefail
+
+          terraform plan \
+            -input=false \
+            -no-color \
+            -out=tfplan \
+            | tee plan.txt
+
+      # -----------------------------------------------------------------------
+      # Pull Request Plan Review
+      # -----------------------------------------------------------------------
+
+      - name: Publish Terraform Plan to Pull Request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+
+            const plan = fs.readFileSync(
+              "${{ env.TF_WORKING_DIR }}/plan.txt",
+              "utf8"
+            );
+
+            const maxLength = 60000;
+
+            const displayedPlan =
+              plan.length > maxLength
+                ? `${plan.substring(0, maxLength)}
+
+            ... plan truncated; full plan is available in the workflow artifact.`
+                : plan;
+
+            const body = [
+              "## Terraform Dev Compute Plan",
+              "",
+              "```terraform",
+              displayedPlan,
+              "```",
+              "",
+              `Plan generated from commit: \`${context.payload.pull_request.head.sha}\``
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+      # -----------------------------------------------------------------------
+      # Immutable Plan Artifact
+      # -----------------------------------------------------------------------
+
+      - name: Upload Reviewed Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-compute-plan-${{ github.event.pull_request.head.sha }}
+          path: |
+            dev/compute/tfplan
+            dev/compute/plan.txt
+          retention-days: 7
