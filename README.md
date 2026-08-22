@@ -55,30 +55,11 @@ The project demonstrates practical experience with:
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    DEV[Engineer] --> PR[GitHub Pull Request]
+<p align="center">
+  <img src="docs/architecture/immutable-aws-infrastructure.png" alt="Immutable AWS Infrastructure with Terraform architecture overview" width="100%" />
+</p>
 
-    PR --> QUALITY[fmt / validate / TFLint / Trivy]
-    QUALITY --> PLAN[Terraform Plan]
-    PLAN --> ARTIFACT[Saved Plan Artifact]
-    ARTIFACT --> REVIEW[Review and Merge]
-
-    REVIEW --> APPROVAL{Production?}
-    APPROVAL -->|Dev / Staging| APPLY[Apply Reviewed Plan]
-    APPROVAL -->|Production| PRODAPP[GitHub Environment Approval]
-    PRODAPP --> APPLY
-
-    APPLY --> OIDC[GitHub OIDC]
-    OIDC --> IAM[AWS Environment IAM Role]
-    IAM --> AWS[AWS Infrastructure]
-
-    MODULES[Versioned Terraform Modules] --> LIVE[Environment Configuration]
-    LIVE --> PLAN
-
-    AWS --> DRIFT[Nightly Drift Detection]
-    DRIFT --> INCIDENT[Drift Investigation if Changed]
-```
+The architecture overview shows the complete delivery and infrastructure model: GitHub-based source control and CI/CD, Terraform-managed AWS resources, environment-specific deployment roles through OIDC, remote state, account guardrails, immutable compute, private database access, monitoring and governance controls.
 
 The central engineering principle is that **Terraform is the controlled write path**. Infrastructure changes are planned, reviewed and deployed through version-controlled code rather than changed manually in AWS.
 
