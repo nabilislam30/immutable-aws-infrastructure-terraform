@@ -118,7 +118,7 @@ immutable-aws-infrastructure-terraform/
     └── PHASE7_EVIDENCE.md
 ```
 
-The module directories retain their own focused README files where useful, but this root README is the **single project-level explanation**.
+This root README is the **single project-level explanation**. Stale placeholder READMEs and empty documentation files from the source snapshots were removed so the portfolio view does not contradict the completed implementation.
 
 ---
 
